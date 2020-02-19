@@ -25,7 +25,7 @@ $VERSION = eval $VERSION;
 
 =item -l
 
-B<file_list>              input tabular file with three columns: SpeciesName, Clade, FileName (mandatory)
+B<file_list>              input tabular file with four columns: UniqueTag, SpeciesName, Ploidy, Clade, FileName (mandatory)
 
 =item -r
 
@@ -179,7 +179,7 @@ our ($opt_l, $opt_r, $opt_o, $opt_t, $opt_s, $opt_c,
      $opt_f, $opt_a, $opt_m, $opt_p, $opt_b, $opt_h,
      $opt_V, $opt_v);
 
-getopts("i:r:o:t:s:c:f:a:m:p:b:hVv");
+getopts("l:r:o:t:s:c:f:a:m:p:b:hVv");
 
 $Config{useithreads} or 
     die('THREAD ERROR: Recompile Perl with threads to run this program.');
@@ -219,48 +219,82 @@ print_header("0) Checking arguments");
 my $filelist = $opt_l || 
     die("\nARGUMENTS ERROR: -l <file_list> option was not supplied.\n");
 
-my %sps2fil = ();
-my %sps2cla = ();
-my %cla2sps = ();
+my %tag2spes = ();
+my %tag2file = ();
+my %sps2clad = ();
+my %sps2ploi = ();
+my %cla2spes = ();
 my $iln = 0;
 open my $ilfh, '<', $filelist;
 
 while(<$ilfh>) {
 
-    ## Input filelist should have three columns: Species_name, Clade and FileName
+    ## Input filelist should have four columns: UniqueTag, Species_name, Ploidy, Clade and FileName
     chomp($_);
     $iln++;
     my @cols = split(/\t/, $_);
-    unless (scalar(@cols) == 3) {
+    unless (scalar(@cols) == 5) {
 
-        die("\n\nPARSING ERROR: Line $iln for file $filelist does not have 3 columns.\n"); 
+        die("\n\nPARSING ERROR: Line $iln for file $filelist does not have 5 columns.\n"); 
     }
     else {
 
-        unless (exists $sps2fil{$cols[0]}) {
+        ## Check requirements for the UniqueTag:
+        ##  1- Unique
+        ##  2- Shorter of 9 characters
+        ##  3- Alphanumeric
 
-            $sps2fil{$cols[0]} = $cols[2];
-            $sps2cla{$cols[0]} = $cols[1];
+        unless (exists $tag2file{$cols[0]}) {
+
+            my $tag_length = length($cols[0]);
+            if ($tag_length > 8) {
+            
+                die("\n\nTAG ERROR: UniqueTag=$cols[0] has more than 8 characters. Please use a shorter UniqueTag (e.g. Niben1)\n\n");
+            }
+            else { 
+
+                if ($cols[0] =~ m/\W/) {
+
+                    die("\n\nTAG ERROR: UniqueTag=$cols[0] contains non alphanumeric characters. Please use only alphanumeric (e.g. Niben1)\n\n"); 
+                }
+                else { 
+               
+                    unless (-e $cols[4]) {
+
+                        die("\n\nFILE ERROR: File=$cols[4], specified in line $iln at file $filelist, does not exists\n\n"); 
+                    }
+                    $tag2file{$cols[0]} = $cols[4];
+                    $tag2spes{$cols[0]} = $cols[1];
+                    $sps2clad{$cols[1]} = $cols[3];
+                    $sps2ploi{$cols[1]} = $cols[2];
+                }
+            }
         }
         else {
 
-            die("\n\nPARING ERROR: Line $iln for file $filelist.\n\tSpecies $cols[0] is not unique. Please use a distint name (e.g. N_benthamiana_1)\n"); 
+            die("\n\nPARSING ERROR: Line $iln for file $filelist.\n\tUniqueTag=$cols[0] is not unique. Please use a distint name (e.g. Niben1)\n"); 
         }
-        unless (exists $cla2sps{$cols[1]}) {
 
-            $cla2sps{$cols[1]} = [$cols[0]];
+        ## Add the other info
+ 
+        unless (exists $cla2spes{$cols[3]}) {
+
+            $cla2spes{$cols[3]} = [$cols[1]];
         }
         else {
 
-            push(@{$cla2sps{$cols[1]}}, $cols[0]); 
+            push(@{$cla2spes{$cols[3]}}, $cols[1]); 
         }
     }
 }
 
-my $sps_n = scalar(keys(%sps2fil));
-my $cla_n = scalar(keys(%cla2sps)); 
-print STDERR "\n\tFile $filelist has $sps_n defined species.\n";
-print STDERR "\tFile $filelist has $cla_n defined clades.\n";
+my $tags_n = scalar(keys(%tag2file));
+my $spes_n = scalar(keys(%sps2clad));
+my $clad_n = scalar(keys(%cla2spes));
+print STDERR "\tFile $filelist parsing summary:\n";
+print STDERR "\t- $tags_n unique tags.\n"; 
+print STDERR "\t- $spes_n species.\n";
+print STDERR "\t- $clad_n clades.\n";
 
 
 
@@ -295,8 +329,8 @@ sub help {
 
     Flags:
     
-      -l <file_list>             input tabular file with three columns: SpeciesName, 
-                                  Clade,FileName (mandatory)
+      -l <file_list>             input tabular file with five columns: UniqueTag, 
+                                  SpeciesName, Ploidy, Clade, FileName (mandatory)
       -r <reference_taxa_name>   reference taxa name, with underscoress no spaces
                                   (e.g. Nicotiana_benthamiana) (mandatory)
       -o <output_dir>            name of the output directory (mandatory)
@@ -317,4 +351,23 @@ sub help {
 EOF
 exit (1);
 }
+
+
+##############################################################################
+## Just a simple function to print a message with some format
+##############################################################################
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+    chomp($date);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
 
