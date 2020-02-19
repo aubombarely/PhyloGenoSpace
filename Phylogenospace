@@ -1,0 +1,320 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ Phylogenospace
+ Tool to characterize the origin of a genome using a phylogenomic tools
+
+=cut
+
+our $VERSION = '0.1';
+$VERSION = eval $VERSION;
+
+=head1 SYPNOSIS
+
+ Phylogenospace [-h] -l <file_list> -r <reference_taxa_name> -g <reference_taxa_gff> -o <output_dir> 
+                [-t <threads>] [-s <stage>] [-V] [-v]
+                [-c <clustering_parameters>] [-f <taxa_filtering>]
+                [-a <alignment_parameters>] [-m <alignment_filtering>]
+                [-p <phylogenetic_parameters>] [-b <minimum_bootstrap>] 
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -l
+
+B<file_list>              input tabular file with three columns: SpeciesName, Clade, FileName (mandatory)
+
+=item -r
+
+B<reference_taxa_name>    reference taxa name, with underscoress no spaces (e.g. Nicotiana_benthamiana) (mandatory)
+
+=item -o
+
+B<output_dir>             name of the output directory (mandatory)
+
+=item -t
+
+B<threads>                number of threads (default: 2)
+
+=item -s
+
+B<stage>                  initial stage to start (default: 01_translation)
+
+=item -c
+
+B<clustering_parameters>  clustering parameters to generate gene families
+
+=item -f
+
+B<taxa_filter>            minimum/maximum number of taxa/clades for filtering (default: none)
+
+=item -a
+
+B<alignment_parameters>   alignment parameters
+
+=item -m
+
+B<alignment_filtering>    alignment filtering parameters
+
+=item -p
+
+B<phylogene_parameters>   phylogenetic parameters
+
+=item -b
+
+B<min_bootstrap>          do not consider trees where the nodes analyzed have a bootstrap < min_bootstrap
+
+=item -V
+
+B<be_verbose>             be verbose and print more info 
+
+=item -h
+
+B<help>                   print the help
+
+=item -v
+
+B<version>                print program version
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ Phygenospace is a script to perform the phylogenetic analysis of the gene
+ space of a target species (-r <reference_target_name>) comparing each gene
+ (in a gene family context) with other genes from different species.
+
+ This script is divided in the following steps:
+    01_translation: Translation of the CDS to proteins to perform the SelfBlast.
+      -> Input: list of CDS.fasta files
+      <- Output: a single protein.fasta file
+    02_clustering: SelfBlast and parsing of the output to create gene families.
+      -> Input: a single protein.fasta file
+      <- Output: selfblast file, protein grouping file and gene family file
+    03_alignment: Alignment of the CDS sequences from each of the gene families
+      -> Input: CDS.fasta files and gene family file
+      <- Output: File list with one alignment file per gene family
+    04_substitution_model: Analysis of the preferred substitution model for each gene family
+      -> Input: File list with one alignment file per gene family
+      <- Output: List of each gene family and the preferred substitution model
+    05_tree: Production of the phylogenetic tree, including fast boostrapping
+      -> Input: File list with one alignment file per gene family + substitution models
+      <- Output: File list of each gene family and the newick tree
+    06_taxa_analysis: Analysis of the closest species/clade to the target sequences
+      -> Input: File list of each gene family and the newick tree
+      <- Output: List of genes for the target species and their closest species/clade
+    07_block_analysis: Adding of the information to a GFF file and analysis of blocks
+      -> Input: List of genes for the target species and their closest species/clade + Gff
+      <- Output: Annotated GFF file and blocks in a bed format
+
+  This script uses the following external programs defined with the following
+  enviromental variables:
+      DIAMOND: DNA/Protein sequence to protein alignment (http://www.diamondsearch.org/)
+      HIPMCL: A parallel implementation of MCL (https://bitbucket.org/azadcse/hipmcl/wiki/Home)
+      GUIDANCE: A multiple sequence alignment pipeline (http://guidance.tau.ac.il/)
+      IQTREE: A Maximum Likelihood implementation with fast boostrapping (http://www.iqtree.org/)
+
+  Additionally it uses the following Perl components:
+      IPC::Cmd
+      Bio::SeqIO (Bioperl)
+      Bio::TreeIO (Bioperl)      
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely
+  (aureliano.bombarely@unimi.it).
+
+=cut
+
+=head1 METHODS
+
+ Phylogenospace
+
+=cut
+
+
+use strict;
+use warnings;
+use autodie;
+
+use Config;
+use threads;
+
+use Getopt::Std;
+use File::Spec;
+use File::Basename;
+use File::Copy;
+use File::Path qw(make_path remove_tree);
+use IPC::Cmd qw[can_run run];
+use Math::BigFloat;
+use Bio::SeqIO;
+use Bio::TreeIO;
+
+########## DEFINE ARGUMENTS ##########
+## List of options
+## -l <file_list>
+## -r <reference_taxa_name>
+## -o <output_dir>
+## -t <threads>
+## -s <stage>
+## -c <clustering_parameters>
+## -f <taxa_filter>
+## -a <alignment_parameters>
+## -m <alignment_filtering>
+## -p <phylogene_parameters>
+## -b <min_bootstrap>
+## -h <help>
+## -V <be_verbose>
+## -v <version>
+
+
+our ($opt_l, $opt_r, $opt_o, $opt_t, $opt_s, $opt_c,
+     $opt_f, $opt_a, $opt_m, $opt_p, $opt_b, $opt_h,
+     $opt_V, $opt_v);
+
+getopts("i:r:o:t:s:c:f:a:m:p:b:hVv");
+
+$Config{useithreads} or 
+    die('THREAD ERROR: Recompile Perl with threads to run this program.');
+
+if (!$opt_l && !$opt_r && !$opt_o && !$opt_t && !$opt_s && !$opt_c && 
+    !$opt_f && !$opt_a && !$opt_m && !$opt_p && !$opt_b && !$opt_h &&
+    !$opt_V && !$opt_v) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+elsif ($opt_h) {
+    help();
+}
+elsif ($opt_v) {
+    print STDERR "\nPhygenospace version: $VERSION\n";
+    print STDERR "Developed at the Bombarely Laboratory (2020-02-18)\n\n";
+    exit(1);
+}
+
+########## STEP 0: CHECK ARGUMENTS ##########
+
+my $date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## Phylogenospace Starts ($date) ##\n";
+print STDERR "############################################################\n\n";
+
+## Define a variable to keep the stats;
+
+my %globalstats = ();
+
+print_header("0) Checking arguments");
+
+## Some of the variables depend on the step selected
+## but the input should be similar for all the them
+
+my $filelist = $opt_l || 
+    die("\nARGUMENTS ERROR: -l <file_list> option was not supplied.\n");
+
+my %sps2fil = ();
+my %sps2cla = ();
+my %cla2sps = ();
+my $iln = 0;
+open my $ilfh, '<', $filelist;
+
+while(<$ilfh>) {
+
+    ## Input filelist should have three columns: Species_name, Clade and FileName
+    chomp($_);
+    $iln++;
+    my @cols = split(/\t/, $_);
+    unless (scalar(@cols) == 3) {
+
+        die("\n\nPARSING ERROR: Line $iln for file $filelist does not have 3 columns.\n"); 
+    }
+    else {
+
+        unless (exists $sps2fil{$cols[0]}) {
+
+            $sps2fil{$cols[0]} = $cols[2];
+            $sps2cla{$cols[0]} = $cols[1];
+        }
+        else {
+
+            die("\n\nPARING ERROR: Line $iln for file $filelist.\n\tSpecies $cols[0] is not unique. Please use a distint name (e.g. N_benthamiana_1)\n"); 
+        }
+        unless (exists $cla2sps{$cols[1]}) {
+
+            $cla2sps{$cols[1]} = [$cols[0]];
+        }
+        else {
+
+            push(@{$cla2sps{$cols[1]}}, $cols[0]); 
+        }
+    }
+}
+
+my $sps_n = scalar(keys(%sps2fil));
+my $cla_n = scalar(keys(%cla2sps)); 
+print STDERR "\n\tFile $filelist has $sps_n defined species.\n";
+print STDERR "\tFile $filelist has $cla_n defined clades.\n";
+
+
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+
+    Usage:
+       
+       Phylogenospace [-h] -l <file_list> -r <reference_taxa_name> 
+                -g <reference_taxa_gff> -o <output_dir>
+                [-t <threads>] [-s <stage>] [-V] [-v]
+                [-c <clustering_parameters>] [-f <taxa_filtering>]
+                [-a <alignment_parameters>] [-m <alignment_filtering>]
+                [-p <phylogenetic_parameters>] [-b <minimum_bootstrap>]
+
+    Flags:
+    
+      -l <file_list>             input tabular file with three columns: SpeciesName, 
+                                  Clade,FileName (mandatory)
+      -r <reference_taxa_name>   reference taxa name, with underscoress no spaces
+                                  (e.g. Nicotiana_benthamiana) (mandatory)
+      -o <output_dir>            name of the output directory (mandatory)
+      -t <threads>               number of threads (default: 2)
+      -s <stage>                 initial stage to start (default: 01_translation)
+      -c <clustering_parameters> clustering parameters to generate gene families
+      -f <taxa_filter>           minimum/maximum number of taxa/clades for filtering
+                                  (default: none)
+      -a <alignment_parameters>  alignment parameters
+      -m <alignment_filtering>   alignment filtering parameters
+      -p <phylogene_parameters>  phylogenetic parameters
+      -b <min_bootstrap>         do not consider trees where the nodes analyzed have a
+                                  bootstrap < min_bootstrap
+      -V <be_verbose>            be verbose and print more info
+      -h <help>                  print the help
+      -v <version>               print program version
+
+EOF
+exit (1);
+}
+
