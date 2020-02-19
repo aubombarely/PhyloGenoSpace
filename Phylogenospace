@@ -115,11 +115,12 @@ B<version>                print program version
   This script uses the following external programs defined with the following
   enviromental variables:
       DIAMOND: DNA/Protein sequence to protein alignment (http://www.diamondsearch.org/)
-      HIPMCL: A parallel implementation of MCL (https://bitbucket.org/azadcse/hipmcl/wiki/Home)
+      MCL: MCL (https://bitbucket.org/azadcse/hipmcl/wiki/Home)
       GUIDANCE: A multiple sequence alignment pipeline (http://guidance.tau.ac.il/)
       IQTREE: A Maximum Likelihood implementation with fast boostrapping (http://www.iqtree.org/)
 
   Additionally it uses the following Perl components:
+      Sys::Info
       IPC::Cmd
       Bio::SeqIO (Bioperl)
       Bio::TreeIO (Bioperl)      
@@ -146,6 +147,9 @@ use autodie;
 
 use Config;
 use threads;
+
+use Sys::Info;
+use Sys::Info::Constants qw( :device_cpu );
 
 use Getopt::Std;
 use File::Spec;
@@ -295,6 +299,106 @@ print STDERR "\tFile $filelist parsing summary:\n";
 print STDERR "\t- $tags_n unique tags.\n"; 
 print STDERR "\t- $spes_n species.\n";
 print STDERR "\t- $clad_n clades.\n";
+
+my $taxatarget = $opt_r ||
+    die("\n\nARGUMENTS ERROR: -r <reference_taxa_name> option was not supplied.\n\n");
+unless (exists $sps2clad{$opt_r}) {
+
+    die("\n\nCOHERENCE ARGUMENT ERROR: -r $taxatarget is not present at the file $filelist\n\n");
+}
+else {
+
+    print STDERR "\n\tTaxa target name: $taxatarget\n";
+}
+
+my $outbase = $opt_o ||
+    die("\n\nARGUMENTS ERROR: -o <output_dir> option was not supplied.\n\n");
+
+if (-e $outbase) { 
+
+    if (-d $outbase) {
+
+        print STDERR "\n\tOutbase directory $outbase exists.\n\tPhylogenospace will use as base directory.\n";
+    }
+    else {
+
+        die("\n\nARGUMENT ERROR: -o $outbase exists but it is not a directory.\n\n"); 
+    }
+} 
+else {
+
+    print STDERR "\n\tOutbase directory $outbase does not exists.\n\tCreating directory $outbase\n";
+    mkdir($outbase);
+}
+
+### Check optional variables ###
+
+## THREADS:
+## 1- Retrieve the number of CPUs in the system
+my $system_info = Sys::Info->new();
+my $system_cpu  = $system_info->device( CPU => () );
+my $cpu_n = $system_cpu->count();
+
+## 2- Check the argument
+my $threads = 2;
+if ($opt_t) {
+
+    if ($opt_t =~ m/^[0-9]+$/) {
+
+        if ($opt_t > $cpu_n) {
+
+            die("\n\nCONFIGURATION ERROR: -t <threads> argument is bigger ($opt_t) than the number of available CPUs in the system ($cpu_n).\n\n");
+        }
+        else {
+
+            $threads = $opt_t;
+        }
+    }
+    else {
+
+        die("\n\nARGUMENT ERROR: -t <threads> argument is not a numeric value ($opt_t).\n\n"); 
+    }
+}
+print STDERR "\n\tNumber of threads: $threads (of $cpu_n available in the system)\n";
+
+
+### Check the executables ###
+
+my %exec_list = (
+    DIAMOND_PATH    => ['diamond'],
+    MCL_PATH        => ['mcl'],
+    GUIDANCE_PATH   => ['guidance.pl'],
+    IQTREE_PATH     => ['iqtree']
+    );
+
+my %exepath = ();
+
+foreach my $exec_key (sort keys %exec_list) {
+
+    my @execitems = @{$exec_list{$exec_key}};
+    foreach my $e_item (@execitems) {
+
+        if (exists $ENV{$exec_key}) {
+    
+            print STDERR "\t$exec_key PATH defined for $e_item executable\n";
+            $exepath{$e_item} = File::Spec->catfile($ENV{$exec_key}, $e_item);
+        }
+        else {
+    
+            my $exe_path = can_run($e_item);
+            if ($exe_path) {
+                
+                $exepath{$e_item} = $exe_path;
+                print STDERR "\t$e_item is available in the PATH ($exe_path)\n";
+            }
+            else {
+                
+                print STDERR "\nERROR: $e_item executable ($exec_key package)";
+                die(" is not accessible.\n");
+            }      
+        }       
+    }
+}
 
 
 
